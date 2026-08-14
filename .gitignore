@@ -1,0 +1,74 @@
+# =============================================================================
+# California Rivers Sentinel Project .gitignore
+# =============================================================================
+
+# Large geospatial data files — too big for GitHub
+*.tif
+*.tiff
+*.vrt
+*.img
+*.jp2
+
+# Vector data files
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.sbn
+*.sbx
+
+# Compressed files
+*.zip
+*.tar
+*.gz
+*.tar.gz
+
+# Output directories — large intermediate and final outputs
+outputs/
+
+# Log files
+*.log
+logs/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.ipynb_checkpoints/
+
+# OmniWaterMask cache
+OWM_cache/
+cache/
+
+# Temporary files created during processing
+*_clipped.tif
+*_clipped_OmniWaterMask_*.tif
+*.vrt
+_temp_*.vrt
+_temp_*.tif
+
+# Conda environment
+*.conda
+*.egg-info/
+
+# R project files
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# SLURM output files
+*.out
+*.err
+
+# Diagnostic images — large folders of PNGs
+diagnostics/
+movies/
+comparisons/
