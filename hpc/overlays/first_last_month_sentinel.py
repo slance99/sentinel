@@ -1,10 +1,10 @@
 # =============================================================================
-# sentinel_first_last_overlay.py
+# sentinel_monthly_overlay.py
 #
-# For each river section, finds the first and last year Sentinel water mask,
-# overlays them on the Sentinel image from the first year, producing one
-# output image per section:
-#   {section}_{first_year}_vs_{last_year}.png
+# For each river section, finds the first and last year of a specific month
+# Sentinel water mask, overlays them on the Sentinel image from the first year,
+# producing one output image per section per month:
+#   {section}_{month}_{first_year}_vs_{last_year}.png
 #
 # Color scheme (at 50% transparency over Sentinel imagery):
 #   Yellow [1.0, 0.9, 0.0] = first year only (water lost)
@@ -13,11 +13,11 @@
 #   Transparent             = no water in either year
 #
 # Usage:
-#   python sentinel_first_last_overlay.py <river_name> <outputs_folder>
-#   e.g. python sentinel_first_last_overlay.py sacramento red_bluff_colusa
+#   python sentinel_monthly_overlay.py <river_name> <outputs_folder>
+#   e.g. python sentinel_monthly_overlay.py sacramento red_bluff_colusa
 #
 # For SLURM:
-#   sbatch sentinel_overlay.sh sacramento red_bluff_colusa
+#   sbatch sentinel_monthly_overlay.sh sacramento red_bluff_colusa
 # =============================================================================
 
 import os
@@ -38,7 +38,7 @@ from rasterio.transform import from_bounds
 # =============================================================================
 
 parser = argparse.ArgumentParser(
-    description="Generate first vs last year Sentinel water mask overlay images"
+    description="Generate first vs last year monthly Sentinel water mask overlay images"
 )
 parser.add_argument("river", help="River name e.g. sacramento")
 parser.add_argument(
@@ -58,12 +58,20 @@ OUTPUTS = args.outputs if args.outputs else f"{RIVER}_outputs"
 # =============================================================================
 
 # ── Base paths ────────────────────────────────────────────────────────────────
-YEARLY_ROOT = Path("/home/geomorph/slance/gee_watermask/outputs/yearly_outputs")
+MONTHLY_ROOT = Path("/home/geomorph/california_rivers/gee_watermask/outputs/monthly_outputs")
 
-# ── Output directory ──────────────────────────────────────────────────────────
-OUTPUT_DIR = Path("/home/geomorph/california_rivers/gee_watermask/outputs/overlays/omni_overlays") #changed to omni_overlays for omni new sentinel watermasks 
+# ── Output directory ──────────────────────────────────────────────----------------------------------------------------------------────────────
+OUTPUT_DIR = Path("/home/geomorph/california_rivers/gee_watermask/outputs/overlays/monthly_overlays")
 OVERLAY_ALPHA = 0.5
 DPI           = 150
+
+# ── Month names for labels ────────────────────────────────────────────────────
+MONTH_NAMES = {
+    '01': 'January',   '02': 'February',  '03': 'March',
+    '04': 'April',     '05': 'May',        '06': 'June',
+    '07': 'July',      '08': 'August',     '09': 'September',
+    '10': 'October',   '11': 'November',   '12': 'December'
+}
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 COLOR_LOST       = [1.0, 0.9, 0.0]  # yellow  — water lost by last year
@@ -77,13 +85,13 @@ COLOR_PERSISTENT = [1.0, 1.0, 1.0]  # white   — water in both years
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-print(f"River:      {RIVER}")
-print(f"Outputs:    {OUTPUTS}")
-print(f"Yearly outputs from: {YEARLY_ROOT}")
-print(f"Output to:  {OUTPUT_DIR}\n")
+print(f"River:          {RIVER}")
+print(f"Outputs:        {OUTPUTS}")
+print(f"Monthly outputs from: {MONTHLY_ROOT}")
+print(f"Output to:      {OUTPUT_DIR}\n")
 
-if not YEARLY_ROOT.exists():
-    print(f"ERROR: Yearly outputs directory does not exist: {YEARLY_ROOT}")
+if not MONTHLY_ROOT.exists():
+    print(f"ERROR: Monthly outputs directory does not exist: {MONTHLY_ROOT}")
     raise SystemExit(1)
 
 
@@ -91,50 +99,47 @@ if not YEARLY_ROOT.exists():
 # HELPER FUNCTIONS
 # =============================================================================
 
-def parse_year_from_mask(path):
+def parse_year_month_from_mask(path):
     """
-    Extract start year from mask filename.
-    e.g. sacramento_32_2018_01_01_2018_12_31_mask.tif -> 2018
+    Extract year and month from mask filename.
+    e.g. sacramento_32_2018_01_01_2018_01_31_mask.tif -> (2018, '01')
     """
-    match = re.search(r'_(\d{4})_\d{2}_\d{2}_\d{4}_\d{2}_\d{2}_mask', path.stem)
-    return int(match.group(1)) if match else None
+    match = re.search(r'_(\d{4})_(\d{2})_\d{2}_\d{4}_\d{2}_\d{2}_mask', path.stem)
+    if match:
+        return int(match.group(1)), match.group(2)
+    return None, None
 
 
-def parse_year_from_image(path):
+def parse_year_month_from_image(path):
     """
-    Extract start year from image filename.
-    e.g. sacramento_32_2018_01_01_2018_12_31_full_image.tif -> 2018
+    Extract year and month from image filename.
+    e.g. sacramento_32_2018_01_01_2018_01_31_full_image.tif -> (2018, '01')
     """
-    match = re.search(r'_(\d{4})_\d{2}_\d{2}_\d{4}_\d{2}_\d{2}_full_image', path.stem)
-    return int(match.group(1)) if match else None
+    match = re.search(r'_(\d{4})_(\d{2})_\d{2}_\d{4}_\d{2}_\d{2}_full_image', path.stem)
+    if match:
+        return int(match.group(1)), match.group(2)
+    return None, None
 
 
 def load_sentinel_rgb(image_path):
     """
     Load a Sentinel image as an RGB array normalized to 0-1.
-    Sentinel bands from getSentinelCollection:
-      0=uBlue, 1=Blue, 2=Green, 3=Red, 4=NIR, 5=SWIR1, 6=SWIR2, 7=BQA
-    Using Red=4, Green=3, Blue=2 for a natural-ish color composite.
-    Returns rgb array, shape, transform, crs, and bounds.
+    Sentinel bands: 0=uBlue, 1=Blue, 2=Green, 3=Red, 4=NIR, 5=SWIR1, 6=SWIR2, 7=BQA
+    Using Red=4, Green=3, Blue=2 for natural color composite.
     """
     with rasterio.open(image_path) as src:
-        # Read Red, Green, Blue bands (1-indexed for rasterio)
         r = src.read(4).astype(float)  # Red
         g = src.read(3).astype(float)  # Green
-        b = src.read(2).astype(float)  # Blue (uBlue)
+        b = src.read(2).astype(float)  # Blue
         transform = src.transform
         crs       = src.crs
         bounds    = src.bounds
         out_shape = (src.height, src.width)
 
-    # Normalize — Sentinel SR values are typically 0-1 after rescaling
-    # but may need stretching for display
     rgb = np.stack([r, g, b], axis=-1)
-    
-    # Clip and normalize to 0-1 for display
     p2, p98 = np.percentile(rgb[rgb > 0], (2, 98)) if np.any(rgb > 0) else (0, 1)
     rgb = np.clip((rgb - p2) / (p98 - p2 + 1e-10), 0, 1)
-    
+
     return rgb, out_shape, transform, crs, bounds
 
 
@@ -166,13 +171,6 @@ def load_mask_aligned(mask_path, target_shape, bounds, target_crs):
 def make_overlay_rgba(first_mask, last_mask, alpha=OVERLAY_ALPHA):
     """
     Build an RGBA overlay from two binary water masks.
-    Non-water pixels are fully transparent so Sentinel background shows through.
-
-    Colors:
-      Yellow [1.0, 0.9, 0.0] = first year only (water lost)
-      Purple [0.6, 0.2, 0.9] = last year only  (water gained)
-      White  [1.0, 1.0, 1.0] = both years      (persistent)
-      Transparent             = no water
     """
     h, w = first_mask.shape
     overlay = np.zeros((h, w, 4), dtype=np.float32)
@@ -191,21 +189,22 @@ def make_overlay_rgba(first_mask, last_mask, alpha=OVERLAY_ALPHA):
 
 
 def save_overlay_image(sentinel_rgb, overlay, stats, bounds,
-                       section_name, first_year, last_year,
+                       section_name, month, first_year, last_year,
                        output_path):
     """
     Compose and save a single overlay image with Sentinel background.
     """
+    month_name = MONTH_NAMES.get(month, month)
+
     fig, ax = plt.subplots(figsize=(14, 10))
     fig.patch.set_facecolor("black")
     fig.suptitle(
-        f"{section_name.replace('_', ' ')}  —  {first_year} vs {last_year}",
+        f"{section_name.replace('_', ' ')}  —  {month_name} {first_year} vs {month_name} {last_year}",
         fontsize=16, fontweight="bold", color="white"
     )
 
     ax.set_facecolor("black")
 
-    # Sentinel RGB background
     ax.imshow(
         sentinel_rgb,
         extent=[bounds.left, bounds.right, bounds.bottom, bounds.top],
@@ -215,7 +214,6 @@ def save_overlay_image(sentinel_rgb, overlay, stats, bounds,
         zorder=1
     )
 
-    # Color overlay
     ax.imshow(
         overlay,
         extent=[bounds.left, bounds.right, bounds.bottom, bounds.top],
@@ -235,9 +233,9 @@ def save_overlay_image(sentinel_rgb, overlay, stats, bounds,
 
     legend_elements = [
         Patch(facecolor=COLOR_LOST, alpha=OVERLAY_ALPHA,
-              label=f"Water lost by {last_year} ({stats['lost']:,} px)"),
+              label=f"Water in {month_name} {first_year} only (lost by {last_year}) ({stats['lost']:,} px)"),
         Patch(facecolor=COLOR_GAINED, alpha=OVERLAY_ALPHA,
-              label=f"Water gained by {last_year} ({stats['gained']:,} px)"),
+              label=f"Water in {month_name} {last_year} only (gained since {first_year}) ({stats['gained']:,} px)"),
         Patch(facecolor=COLOR_PERSISTENT, alpha=OVERLAY_ALPHA,
               label=f"Persistent water ({stats['persistent']:,} px)"),
         Patch(facecolor=[0.05, 0.05, 0.05], edgecolor="white",
@@ -264,14 +262,13 @@ def save_overlay_image(sentinel_rgb, overlay, stats, bounds,
 # =============================================================================
 
 # ── Find all river section folders ───────────────────────────────────────────
-# Looks for folders matching {river}_N pattern e.g. sacramento_1, sacramento_32
 section_dirs = sorted([
-    d for d in YEARLY_ROOT.iterdir()
+    d for d in MONTHLY_ROOT.iterdir()
     if d.is_dir() and re.match(rf'{RIVER}_\d+$', d.name)
 ])
 
 if not section_dirs:
-    print(f"ERROR: No section folders found matching '{RIVER}_N' in {YEARLY_ROOT}")
+    print(f"ERROR: No section folders found matching '{RIVER}_N' in {MONTHLY_ROOT}")
     raise SystemExit(1)
 
 print(f"Found {len(section_dirs)} section folders\n")
@@ -281,8 +278,8 @@ for section_dir in section_dirs:
     print(f"{'='*50}")
     print(f"Processing: {section_name}")
 
-    mask_dir  = section_dir / "omni_mask" #changed to omni_mask because of new masking technique 
-    image_dir = section_dir / "image" #keep image the same because no new downloads for gee technique 
+    mask_dir  = section_dir / "mask"
+    image_dir = section_dir / "image"
 
     if not mask_dir.exists():
         print(f"  Skipping — no mask folder found")
@@ -292,73 +289,84 @@ for section_dir in section_dirs:
         print(f"  Skipping — no image folder found")
         continue
 
-    # ── Collect masks by year ─────────────────────────────────────────────
-    masks_by_year = {}
+    # ── Collect masks by month and year ──────────────────────────────────
+    # Structure: masks_by_month[month][year] = path
+    masks_by_month = defaultdict(dict)
     for mask_path in sorted(mask_dir.glob("*.tif")):
-        year = parse_year_from_mask(mask_path)
-        if year is not None:
-            masks_by_year[year] = mask_path
+        year, month = parse_year_month_from_mask(mask_path)
+        if year is not None and month is not None:
+            masks_by_month[month][year] = mask_path
 
-    # ── Collect images by year ────────────────────────────────────────────
-    images_by_year = {}
+    # ── Collect images by month and year ──────────────────────────────────
+    images_by_month = defaultdict(dict)
     for image_path in sorted(image_dir.glob("*.tif")):
-        year = parse_year_from_image(image_path)
-        if year is not None:
-            images_by_year[year] = image_path
+        year, month = parse_year_month_from_image(image_path)
+        if year is not None and month is not None:
+            images_by_month[month][year] = image_path
 
-    years = sorted(masks_by_year.keys())
-    print(f"  Available mask years: {years}")
-
-    if len(years) < 2:
-        print(f"  Skipping — need at least 2 years, found {len(years)}")
+    if not masks_by_month:
+        print(f"  Skipping — no masks found")
         continue
 
-    first_year = years[0]
-    last_year  = years[-2]  # second to last year
+    print(f"  Found masks for months: {sorted(masks_by_month.keys())}")
 
-    print(f"  Comparing: {first_year} vs {last_year}")
+    # ── Process each month ────────────────────────────────────────────────
+    for month in sorted(masks_by_month.keys()):
+        month_name = MONTH_NAMES.get(month, month)
+        year_dict  = masks_by_month[month]
+        years      = sorted(year_dict.keys())
 
-    # ── Output path ───────────────────────────────────────────────────────
-    out_path = OUTPUT_DIR / f"{section_name}_{first_year}_vs_{last_year}.png"
+        print(f"  -- {month_name}: available years {years}")
 
-    if out_path.exists():
-        print(f"  Skipping — output already exists")
-        continue
+        if len(years) < 2:
+            print(f"    Skipping — need at least 2 years, found {len(years)}")
+            continue
 
-    # ── Find background image ─────────────────────────────────────────────
-    # Use first year Sentinel image as background
-    bg_image_path = images_by_year.get(first_year)
-    if bg_image_path is None:
-        print(f"  WARNING: no Sentinel image for {first_year}, trying last year")
-        bg_image_path = images_by_year.get(last_year)
-    if bg_image_path is None:
-        print(f"  Skipping — no Sentinel images found")
-        continue
+        first_year = years[0]
+        last_year  = years[-2]  # second to last year
 
-    try:
-        print(f"  Loading Sentinel background: {bg_image_path.name}")
-        sentinel_rgb, out_shape, sentinel_transform, sentinel_crs, bounds = \
-            load_sentinel_rgb(bg_image_path)
+        print(f"    Comparing: {first_year} vs {last_year}")
 
-        first_mask = load_mask_aligned(
-            masks_by_year[first_year], out_shape, bounds, sentinel_crs
-        )
-        last_mask = load_mask_aligned(
-            masks_by_year[last_year], out_shape, bounds, sentinel_crs
-        )
+        # ── Output path ───────────────────────────────────────────────────
+        out_path = OUTPUT_DIR / f"{section_name}_{month}_{first_year}_vs_{last_year}.png"
 
-        overlay, stats = make_overlay_rgba(first_mask, last_mask)
+        if out_path.exists():
+            print(f"    Skipping — output already exists")
+            continue
 
-        save_overlay_image(
-            sentinel_rgb, overlay, stats, bounds,
-            section_name, first_year, last_year,
-            output_path=out_path
-        )
+        # ── Find background image ─────────────────────────────────────────
+        bg_image_path = images_by_month[month].get(first_year)
+        if bg_image_path is None:
+            print(f"    WARNING: no image for {month_name} {first_year}, trying last year")
+            bg_image_path = images_by_month[month].get(last_year)
+        if bg_image_path is None:
+            print(f"    Skipping — no images found for {month_name}")
+            continue
 
-        del sentinel_rgb, first_mask, last_mask, overlay
+        try:
+            print(f"    Loading Sentinel background: {bg_image_path.name}")
+            sentinel_rgb, out_shape, sentinel_transform, sentinel_crs, bounds = \
+                load_sentinel_rgb(bg_image_path)
 
-    except Exception as e:
-        print(f"  ERROR: {e}")
-        continue
+            first_mask = load_mask_aligned(
+                year_dict[first_year], out_shape, bounds, sentinel_crs
+            )
+            last_mask = load_mask_aligned(
+                year_dict[last_year], out_shape, bounds, sentinel_crs
+            )
+
+            overlay, stats = make_overlay_rgba(first_mask, last_mask)
+
+            save_overlay_image(
+                sentinel_rgb, overlay, stats, bounds,
+                section_name, month, first_year, last_year,
+                output_path=out_path
+            )
+
+            del sentinel_rgb, first_mask, last_mask, overlay
+
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            continue
 
 print("\nAll done!")
