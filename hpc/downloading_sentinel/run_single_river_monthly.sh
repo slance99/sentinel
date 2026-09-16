@@ -13,7 +13,7 @@ river=$(basename "$poly" .gpkg)
 mask_method="Jones"
 dataset='sentinel'
 network_method="all"
-images="true"
+images="false" #changed 9/16/26 for a run 
 masks="true"
 dtype="int"
 water_level="2"
@@ -21,7 +21,7 @@ start_year=2018
 end_year=2025
 
 # ── Output directory ──────────────────────────────────────────────────────────
-out_root="${OUT_BASE}/monthly_outputs"
+out_root="${OUT_BASE}/monthly_outputs" 
 mkdir -p "$out_root"
 
 # ── Helper: returns the number of days in a given month/year ─────────────────
@@ -48,16 +48,6 @@ for year in $(seq $start_year $end_year); do
         end="${month}-${last_day}"
 
         echo "[$river] Processing: Year=$year | Month=$month" 
-
-	# ── Skip if image already exists for this month ───────────────────────────────
-	start_text="${year}_${month}_01"
-	end_text="${year}_${month}_${last_day}"
-	image_check="${out_root}/${river}/image/${river}_${start_text}_${end_text}_full_image.tif"
-
-	if [ -f "$image_check" ]; then
-    		echo "[$river] Skipping $year-$month — image already exists"
-    		continue
-	fi
 
         python "${MAIN}" \
             --poly "$poly" \
