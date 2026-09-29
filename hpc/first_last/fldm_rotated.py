@@ -90,7 +90,7 @@ OVERLAY_ALPHA    = 0.5
 DPI              = 150
 MAX_PIXELS       = 20_000_000
 N_WORKERS        = 4
-TARGET_CRS       = "EPSG:26910"
+TARGET_CRS       = "EPSG:32610"
 FORCE_RERUN      = True 
 SEGMENT_LENGTH_M = 5000
 MARKER_COL       = "MARKER"
@@ -406,7 +406,9 @@ def save_overlay_image(sentinel_rgb, overlay, stats, bounds, sentinel_crs,
                        section_name, first_year, last_year,
                        bg_year, output_path,
                        river_mile_points=None,
-                       rotation_angle=None):
+                       rotation_angle=None,
+                       w_orig=None, h_orig=None,
+                       w_rot=None, h_rot=None):
     """Compose and save rotated overlay image."""
 
     # ── Rotate image and overlay ──────────────────────────────────────────────
@@ -414,8 +416,12 @@ def save_overlay_image(sentinel_rgb, overlay, stats, bounds, sentinel_crs,
         sentinel_rgb, overlay, rotation_angle if rotation_angle is not None else 0
     )
 
-    h_orig, w_orig = sentinel_rgb.shape[:2]
-    h_rot,  w_rot  = sentinel_rgb_plot.shape[:2]
+    # ── Use passed dimensions or calculate from arrays ────────────────────────
+    if h_orig is None or w_orig is None:
+        h_orig, w_orig = sentinel_rgb.shape[:2]
+    if h_rot is None or w_rot is None:
+        h_rot, w_rot = sentinel_rgb_plot.shape[:2]
+
     geo_w = bounds.right  - bounds.left
     geo_h = bounds.top    - bounds.bottom
 
@@ -581,10 +587,6 @@ def save_overlay_image(sentinel_rgb, overlay, stats, bounds, sentinel_crs,
 # PROCESS SECTION
 # =============================================================================
 
-# =============================================================================
-# PROCESS SECTION
-# =============================================================================
-
 def process_section(args):
     """
     Process a single section. Produces two rotated images:
@@ -664,8 +666,11 @@ def process_section(args):
                 sentinel_rgb_first, overlay_f,
                 rotation_angle if rotation_angle is not None else 0
             )
+            h_orig, w_orig = sentinel_rgb_first.shape[:2]
+            test_rgb, test_overlay, test_mask = rotate_image_and_mask(
+                sentinel_rgb_first, overlay_f,
+                rotation_angle if rotation_angle is not None else 0)
             h_rot, w_rot = test_rgb.shape[:2]
-            print(f"  {section_name} w_rot: {w_rot}, h_rot: {h_rot}")
             del test_rgb, test_overlay, test_mask
 
             save_overlay_image(
@@ -674,8 +679,9 @@ def process_section(args):
                 section_name, first_year, last_year,
                 bg_year=first_year, output_path=out_first_rot,
                 river_mile_points=river_mile_points,
-                rotation_angle=rotation_angle
-            )
+                rotation_angle=rotation_angle,
+                w_orig=w_orig, h_orig=h_orig,  # ← pass dimensions explicitly
+                w_rot=w_rot, h_rot=h_rot)
             messages.append(f"  Saved {out_first_rot.name}")
 
         del overlay_f, sentinel_rgb_first
