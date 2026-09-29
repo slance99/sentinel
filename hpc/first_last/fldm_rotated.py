@@ -75,14 +75,13 @@ GPKGS = args.gpkgs
 # =============================================================================
 # CONFIG
 # =============================================================================
-
-# ── Input paths ───────────────────────────────────────────────────────────────
-SENTINEL_ROOT  = Path("/home/geomorph/california_rivers/gee_watermask/outputs/monthly_outputs")
+IMAGE_ROOT = Path("/home/geomorph/california_rivers/gee_watermask/outputs/monthly_outputs")
+MASK_ROOT  = Path("/home/geomorph/california_rivers/gee_watermask/outputs/monthly_outputs")
 CENTERLINE_SHP = Path("/home/geomorph/california_rivers/naip/shapefiles/lines/sacramento_line.shp")
 RIVER_MILES_SHP = Path("/home/geomorph/california_rivers/naip/river_miles/river_mile_markers_sacriver_2012.shp")
 
 # ── Output directory ──────────────────────────────────────────────────────────
-OUTPUT_DIR = Path(f"/home/geomorph/california_rivers/gee_watermask/outputs/overlays/doubles/{GPKGS.replace('_gpkgs', '')}")
+OUTPUT_DIR = Path("/home/geomorph/california_rivers/gee_watermask/outputs/overlays/evan_overlays")
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 FIRST_YEAR       = 2018
@@ -111,7 +110,8 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 print(f"River:          {RIVER}")
 print(f"GPKGs:          {GPKGS}")
-print(f"Sentinel root:  {SENTINEL_ROOT}")
+print(f"Image root:  {IMAGE_ROOT}")
+print(f"Mask root:   {MASK_ROOT")
 print(f"Output to:      {OUTPUT_DIR}")
 print(f"Centerline:     {CENTERLINE_SHP}")
 print(f"River miles:    {RIVER_MILES_SHP}")
@@ -198,28 +198,42 @@ def get_centerline_angle(centerline_shp, section_num, segment_length_m,
 
 def rotate_image_and_mask(rgb, overlay, angle_deg):
     """
-    Rotate Sentinel RGB and overlay arrays so river runs horizontally
-    with upstream on the left.
+    Rotate Sentinel RGB and overlay arrays so river runs horizontally.
+    Returns rotated rgb, overlay, and a valid data mask.
     """
     rot_angle = -angle_deg
 
     rgb_rotated = ndimage_rotate(
         rgb, rot_angle, axes=(0, 1),
-        reshape=True, mode='constant', cval=0.0
+        reshape=True, mode='constant', cval=1.0  # white fill
     )
     overlay_rotated = ndimage_rotate(
         overlay, rot_angle, axes=(0, 1),
+        reshape=True, mode='constant', cval=0.0  # transparent fill
+    )
+
+    # ── Create valid data mask ────────────────────────────────────────────────
+    # Rotate a mask of ones to find where actual data exists after rotation
+    valid_mask = np.ones(rgb.shape[:2], dtype=float)
+    valid_mask_rotated = ndimage_rotate(
+        valid_mask, rot_angle,
+        axes=(0, 1),  # ← add this
         reshape=True, mode='constant', cval=0.0
     )
-    return rgb_rotated, overlay_rotated
+    valid_mask_rotated = valid_mask_rotated > 0.5  # binary mask
 
+    # ── Set no-data areas to white in RGB ─────────────────────────────────────
+    rgb_rotated[~valid_mask_rotated] = 1.0
+
+    return rgb_rotated, overlay_rotated, valid_mask_rotated
 
 def load_sentinel_rgb(image_path, target_crs=TARGET_CRS):
     """
     Load Sentinel image as RGB normalized 0-1.
-    Sentinel bands: 0=uBlue, 1=Blue, 2=Green, 3=Red, 4=NIR
+    Sentinel bands: 1=uBlue, 2=Blue, 3=Green, 4=Red, 5=NIR
     Using Red=4, Green=3, Blue=2 for natural color composite.
     Reprojects to TARGET_CRS if needed.
+    Scales DN to surface reflectance using 0.0001 factor.
     """
     with rasterio.open(image_path) as src:
         src_crs  = src.crs
@@ -240,24 +254,43 @@ def load_sentinel_rgb(image_path, target_crs=TARGET_CRS):
                     src_crs, target_crs, width, height, *src.bounds
                 )
 
-            r = src.read(4).astype(float) * 0.0001  # Red
-            g = src.read(3).astype(float) * 0.0001  # Green
-            b = src.read(2).astype(float) * 0.0001  # Blue
+            # ── Reproject each band first, then scale ─────────────────────────
+            r = np.zeros((height, width), dtype=np.float32)
+            g = np.zeros((height, width), dtype=np.float32)
+            b = np.zeros((height, width), dtype=np.float32)
 
-            # ── Gentler stretch for natural color ────────────────────────────────
-            rgb = np.stack([r, g, b], axis=-1)
-            rgb = np.clip(rgb * 3.5, 0, 1)  # simple brightness boost instead of percentile
+            reproject(
+                source=rasterio.band(src, 4),
+                destination=r,
+                src_transform=src.transform,
+                src_crs=src_crs,
+                dst_transform=transform,
+                dst_crs=target_crs,
+                resampling=RasterioResampling.bilinear
+            )
+            reproject(
+                source=rasterio.band(src, 3),
+                destination=g,
+                src_transform=src.transform,
+                src_crs=src_crs,
+                dst_transform=transform,
+                dst_crs=target_crs,
+                resampling=RasterioResampling.bilinear
+            )
+            reproject(
+                source=rasterio.band(src, 2),
+                destination=b,
+                src_transform=src.transform,
+                src_crs=src_crs,
+                dst_transform=transform,
+                dst_crs=target_crs,
+                resampling=RasterioResampling.bilinear
+            )
 
-            for band_idx, arr in enumerate([r, g, b], start=[4, 3, 2][0]):
-                reproject(
-                    source=rasterio.band(src, band_idx),
-                    destination=arr,
-                    src_transform=src.transform,
-                    src_crs=src_crs,
-                    dst_transform=transform,
-                    dst_crs=target_crs,
-                    resampling=RasterioResampling.bilinear
-                )
+            # ── Scale to reflectance after reprojection ───────────────────────
+            r = r * 0.0001
+            g = g * 0.0001
+            b = b * 0.0001
 
             left, bottom, right, top = array_bounds(height, width, transform)
             bounds    = BoundingBox(left, bottom, right, top)
@@ -272,24 +305,21 @@ def load_sentinel_rgb(image_path, target_crs=TARGET_CRS):
                 w = max(1, int(w * scale))
 
             r = src.read(4, out_shape=(h, w),
-                         resampling=RasterioResampling.bilinear).astype(float)
+                         resampling=RasterioResampling.bilinear).astype(float) * 0.0001
             g = src.read(3, out_shape=(h, w),
-                         resampling=RasterioResampling.bilinear).astype(float)
+                         resampling=RasterioResampling.bilinear).astype(float) * 0.0001
             b = src.read(2, out_shape=(h, w),
-                         resampling=RasterioResampling.bilinear).astype(float)
+                         resampling=RasterioResampling.bilinear).astype(float) * 0.0001
             transform = src.transform
             bounds    = src.bounds
             out_crs   = src_crs
             out_shape = (h, w)
 
+    # ── Stack and apply gentle brightness boost for natural color ─────────────
     rgb = np.stack([r, g, b], axis=-1)
-
-    # ── Normalize using percentile stretch for display ────────────────────────
-    p2, p98 = np.percentile(rgb[rgb > 0], (2, 98)) if np.any(rgb > 0) else (0, 1)
-    rgb = np.clip((rgb - p2) / (p98 - p2 + 1e-10), 0, 1)
+    rgb = np.clip(rgb * 3.5, 0, 1)
 
     return rgb, out_shape, transform, out_crs, bounds
-
 
 def load_mask_aligned(mask_path, target_shape, bounds, target_crs):
     """Load water mask aligned to target shape and extent."""
@@ -375,62 +405,45 @@ def get_river_mile_points(river_miles_gdf, target_crs, bounds, pad_frac=0.02):
 
     return result
 
-
 def save_overlay_image(sentinel_rgb, overlay, stats, bounds, sentinel_crs,
                        section_name, first_year, last_year,
                        bg_year, output_path,
                        river_mile_points=None,
                        rotation_angle=None):
-    """Compose and save overlay image with optional rotation."""
+    """Compose and save rotated overlay image."""
 
-    # ── Optional rotation ─────────────────────────────────────────────────────
-    if rotation_angle is not None:
-        sentinel_rgb_plot, overlay_plot = rotate_image_and_mask(
-            sentinel_rgb, overlay, rotation_angle
-        )
+    # ── Rotate image and overlay ──────────────────────────────────────────────
+    sentinel_rgb_plot, overlay_plot, valid_mask = rotate_image_and_mask(
+        sentinel_rgb, overlay, rotation_angle if rotation_angle is not None else 0
+    )
 
-        h_orig, w_orig = sentinel_rgb.shape[:2]
-        h_rot,  w_rot  = sentinel_rgb_plot.shape[:2]
-        geo_w = bounds.right  - bounds.left
-        geo_h = bounds.top    - bounds.bottom
+    h_orig, w_orig = sentinel_rgb.shape[:2]
+    h_rot,  w_rot  = sentinel_rgb_plot.shape[:2]
+    geo_w = bounds.right  - bounds.left
+    geo_h = bounds.top    - bounds.bottom
 
-        cx_orig   = w_orig / 2
-        cy_orig   = h_orig / 2
-        cx_rot    = w_rot  / 2
-        cy_rot    = h_rot  / 2
-        angle_rad = np.radians(-rotation_angle)
-        cos_a     = np.cos(angle_rad)
-        sin_a     = np.sin(angle_rad)
+    cx_orig   = w_orig / 2
+    cy_orig   = h_orig / 2
+    cx_rot    = w_rot  / 2
+    cy_rot    = h_rot  / 2
+    angle_rad = np.radians(-(rotation_angle if rotation_angle is not None else 0))
+    cos_a     = np.cos(angle_rad)
+    sin_a     = np.sin(angle_rad)
 
-        rotated_mile_points = []
-        if river_mile_points:
-            for x_geo, y_geo, label in river_mile_points:
-                px = (x_geo - bounds.left) / geo_w * w_orig
-                py = (bounds.top - y_geo)   / geo_h * h_orig
-                dx = px - cx_orig
-                dy = py - cy_orig
-                px_r = cx_rot + cos_a * dx - sin_a * dy
-                py_r = cy_rot + sin_a * dx + cos_a * dy
-                rotated_mile_points.append((px_r, py_r, label))
-
-        use_pixel_coords  = True
-        mile_points_final = rotated_mile_points
-
-    else:
-        sentinel_rgb_plot = sentinel_rgb
-        overlay_plot      = overlay
-        use_pixel_coords  = False
-        mile_points_final = river_mile_points
-        h_rot, w_rot      = sentinel_rgb.shape[:2]
+    # ── Rotate river mile points ──────────────────────────────────────────────
+    rotated_mile_points = []
+    if river_mile_points:
+        for x_geo, y_geo, label in river_mile_points:
+            px = (x_geo - bounds.left) / geo_w * w_orig
+            py = (bounds.top - y_geo)   / geo_h * h_orig
+            dx = px - cx_orig
+            dy = py - cy_orig
+            px_r = cx_rot + cos_a * dx - sin_a * dy
+            py_r = cy_rot + sin_a * dx + cos_a * dy
+            rotated_mile_points.append((px_r, py_r, label))
 
     # ── Figure size adapts to true aspect ratio ───────────────────────────────
-    if use_pixel_coords:
-        aspect_ratio = h_rot / max(w_rot, 1)
-    else:
-        data_w       = bounds.right - bounds.left
-        data_h       = bounds.top   - bounds.bottom
-        aspect_ratio = data_h / max(data_w, 1)
-
+    aspect_ratio = h_rot / max(w_rot, 1)
     MAX_DIM = 16
     if aspect_ratio >= 1:
         fig_height = MAX_DIM
@@ -438,62 +451,74 @@ def save_overlay_image(sentinel_rgb, overlay, stats, bounds, sentinel_crs,
     else:
         fig_width  = MAX_DIM
         fig_height = MAX_DIM * aspect_ratio
-    fig_height += 2.0
+
+    fig_width  += 5.0
+    fig_height += 3.0
 
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    fig.patch.set_facecolor("black")
+
+    # ── White background everywhere ───────────────────────────────────────────
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+
+    # ── Title ─────────────────────────────────────────────────────────────────
     fig.suptitle(
         f"{section_name.replace('_', ' ')}  —  {first_year} vs {last_year}"
         f"  (background: {bg_year})",
-        fontsize=18, fontweight="bold", color="white"
+        fontsize=24, fontweight="bold", color="black"
     )
-    ax.set_facecolor("black")
 
-    # ── Draw imagery ──────────────────────────────────────────────────────────
-    if use_pixel_coords:
-        ax.imshow(sentinel_rgb_plot, origin="upper", aspect="equal",
-                  interpolation="bilinear", zorder=1)
-        ax.imshow(overlay_plot, origin="upper", aspect="equal",
-                  interpolation="nearest", zorder=2)
-        ax.set_xlim(0, w_rot)
-        ax.set_ylim(h_rot, 0)
-        ax.set_xlabel("← Downstream       Upstream →",
-                      color="white", fontsize=13, labelpad=8)
-        ax.set_ylabel("", color="white")
-        ax.set_xticks([])
-        ax.set_yticks([])
-    else:
-        ax.imshow(sentinel_rgb_plot,
-                  extent=[bounds.left, bounds.right, bounds.bottom, bounds.top],
-                  origin="upper", aspect="equal",
-                  interpolation="bilinear", zorder=1)
-        ax.imshow(overlay_plot,
-                  extent=[bounds.left, bounds.right, bounds.bottom, bounds.top],
-                  origin="upper", aspect="equal",
-                  interpolation="nearest", zorder=2)
-        ax.set_xlim(bounds.left,  bounds.right)
-        ax.set_ylim(bounds.bottom, bounds.top)
-        ax.set_xlabel("Easting (m)",  color="white", fontsize=13, labelpad=8)
-        ax.set_ylabel("Northing (m)", color="white", fontsize=13, labelpad=8)
+    # ── Draw imagery (once only) ──────────────────────────────────────────────
+    ax.imshow(sentinel_rgb_plot, origin="upper", aspect="equal",
+              interpolation="bilinear", zorder=1)
+    ax.imshow(overlay_plot, origin="upper", aspect="equal",
+              interpolation="nearest", zorder=2)
 
-    ax.tick_params(colors="white", labelsize=10)
+    # ── White out no-data areas ───────────────────────────────────────────────
+    white_nodata = np.ones((*valid_mask.shape, 4), dtype=np.float32)
+    white_nodata[..., 3] = (~valid_mask).astype(float)
+    ax.imshow(white_nodata, origin="upper", aspect="equal",
+              interpolation="nearest", zorder=3)
+
+    ax.set_xlim(0, w_rot)
+    ax.set_ylim(h_rot, 0)
+
+    # ── Axis labels ───────────────────────────────────────────────────────────
+    ax.set_ylabel("Northing (m)", color="black", fontsize=16, labelpad=10)
+    ax.set_xlabel("← Downstream          Upstream →\nEasting (m)",
+                  color="black", fontsize=16, labelpad=10)
+
+    # ── Easting and northing tick labels ──────────────────────────────────────
+    x_ticks_px  = np.linspace(0, w_rot, 5)
+    y_ticks_px  = np.linspace(0, h_rot, 5)
+    x_ticks_geo = bounds.left + (x_ticks_px / w_rot) * geo_w
+    y_ticks_geo = bounds.top  - (y_ticks_px / h_rot) * geo_h
+
+    ax.set_xticks(x_ticks_px)
+    ax.set_xticklabels([f"{int(x):,}" for x in x_ticks_geo],
+                       fontsize=13, color="black", rotation=30, ha="right")
+    ax.set_yticks(y_ticks_px)
+    ax.set_yticklabels([f"{int(y):,}" for y in y_ticks_geo],
+                       fontsize=13, color="black")
+
+    ax.tick_params(colors="black", labelsize=13)
     for spine in ax.spines.values():
-        spine.set_edgecolor("white")
+        spine.set_edgecolor("black")
 
     # ── River mile markers ────────────────────────────────────────────────────
-    if mile_points_final:
-        for x, y, label_val in mile_points_final:
-            ax.plot(x, y, "o", color="white", markersize=10,
-                    markeredgecolor="black", markeredgewidth=1.5, zorder=5)
+    if rotated_mile_points:
+        for x, y, label_val in rotated_mile_points:
+            ax.plot(x, y, "o", color="black", markersize=12,
+                    markeredgecolor="white", markeredgewidth=1.5, zorder=5)
             ax.annotate(
                 label_val, (x, y),
                 textcoords="offset points", xytext=(8, 4),
-                fontsize=11, color="white", fontweight="bold", zorder=6,
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="black",
-                          alpha=0.5, edgecolor="none")
+                fontsize=14, color="black", fontweight="bold", zorder=6,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                          alpha=0.7, edgecolor="none")
             )
 
-    # ── Legend ────────────────────────────────────────────────────────────────
+    # ── Legend outside plot on the right ─────────────────────────────────────
     legend_elements = [
         mpatches.Patch(facecolor=COLOR_LOST, alpha=OVERLAY_ALPHA,
                        label=f"Water Present {first_year} ({stats['lost']:,} px)"),
@@ -501,16 +526,23 @@ def save_overlay_image(sentinel_rgb, overlay, stats, bounds, sentinel_crs,
                        label=f"New Water Present in {last_year} ({stats['gained']:,} px)"),
         mpatches.Patch(facecolor=COLOR_PERSISTENT, alpha=OVERLAY_ALPHA,
                        label=f"Persistent Water ({stats['persistent']:,} px)"),
-        mpatches.Patch(facecolor=[0.0, 0.0, 0.0],
+        mpatches.Patch(facecolor=[0.9, 0.9, 0.9], edgecolor="black",
                        label="Sentinel Background"),
-        plt.Line2D([0], [0], color="white", linewidth=1,
-                   marker="o", markersize=8, markerfacecolor="white",
+        plt.Line2D([0], [0], color="black", linewidth=1,
+                   marker="o", markersize=10, markerfacecolor="black",
                    label="River mile marker"),
     ]
     ax.legend(
-        handles=legend_elements, loc="upper right",
-        facecolor="black", edgecolor="white", labelcolor="white",
-        framealpha=0.9, fontsize=11, markerscale=1.5
+        handles=legend_elements,
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1),
+        borderaxespad=0,
+        facecolor="white",
+        edgecolor="black",
+        labelcolor="black",
+        framealpha=1.0,
+        fontsize=14,
+        markerscale=1.5
     )
 
     # ── North arrow ───────────────────────────────────────────────────────────
@@ -530,7 +562,7 @@ def save_overlay_image(sentinel_rgb, overlay, stats, bounds, sentinel_crs,
         xytext=(arrow_x, arrow_y0),
         xycoords="axes fraction",
         arrowprops=dict(
-            arrowstyle="-|>", color="white",
+            arrowstyle="-|>", color="black",
             lw=2.5, mutation_scale=22
         ),
         zorder=10
@@ -540,30 +572,25 @@ def save_overlay_image(sentinel_rgb, overlay, stats, bounds, sentinel_crs,
         arrow_y0 + dy_arr * 1.35,
         "N",
         transform=ax.transAxes,
-        color="white", fontsize=13, fontweight="bold",
+        color="black", fontsize=16, fontweight="bold",
         ha="center", va="center", zorder=10
     )
 
     plt.tight_layout()
-    plt.savefig(output_path, facecolor="black", dpi=DPI, bbox_inches="tight")
+    plt.savefig(output_path, facecolor="white", dpi=DPI, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved -> {output_path.name}")
-
-
 # =============================================================================
 # PROCESS SECTION
 # =============================================================================
 
 def process_section(args):
     """
-    Process a single section. Produces four images:
-      - Original orientation, first year background
-      - Original orientation, last year background
+    Process a single section. Produces two rotated images:
       - Rotated, first year background
       - Rotated, last year background
     """
     (section_name, mask_dir, image_dir,
-     out_first, out_last,
      out_first_rot, out_last_rot,
      first_year, last_year,
      river_miles_gdf,
@@ -675,7 +702,6 @@ def process_section(args):
         import traceback
         return f"  ERROR on {section_name}: {e}\n{traceback.format_exc()}"
 
-
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -698,7 +724,7 @@ if __name__ == "__main__":
 
     # ── Find all river section folders ────────────────────────────────────────
     section_dirs = sorted([
-        d for d in SENTINEL_ROOT.iterdir()
+        d for d in IMAGE_ROOT.iterdir()
         if d.is_dir() and re.match(rf'{RIVER}_\d+$', d.name)
     ])
 
@@ -712,8 +738,8 @@ if __name__ == "__main__":
     section_args = []
     for section_dir in section_dirs:
         section_name = section_dir.name
-        mask_dir     = section_dir / "mask"
-        image_dir    = section_dir / "image"
+        mask_dir  = MASK_ROOT  / section_name / "mask" #change this between mask and omni_mask when running overlays  
+        image_dir = IMAGE_ROOT / section_name / "image" 
 
         if not mask_dir.exists():
             print(f"  Skipping {section_name} — no mask folder")
@@ -726,7 +752,6 @@ if __name__ == "__main__":
         out_last_rot  = OUTPUT_DIR / f"{section_name}_bg{LAST_YEAR}_rotated.png"
 
         all_exist = all([
-            out_first.exists(), out_last.exists(),
             out_first_rot.exists(), out_last_rot.exists()
         ])
         if all_exist and not FORCE_RERUN:
