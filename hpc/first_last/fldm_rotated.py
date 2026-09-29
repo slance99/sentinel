@@ -111,17 +111,13 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 print(f"River:          {RIVER}")
 print(f"GPKGs:          {GPKGS}")
 print(f"Image root:  {IMAGE_ROOT}")
-print(f"Mask root:   {MASK_ROOT")
+print(f"Mask root:   {MASK_ROOT}")
 print(f"Output to:      {OUTPUT_DIR}")
 print(f"Centerline:     {CENTERLINE_SHP}")
 print(f"River miles:    {RIVER_MILES_SHP}")
 print(f"First year:     {FIRST_YEAR}")
 print(f"Last year:      {LAST_YEAR}")
 print(f"Workers:        {N_WORKERS}\n")
-
-if not SENTINEL_ROOT.exists():
-    print(f"ERROR: Sentinel root does not exist: {SENTINEL_ROOT}")
-    raise SystemExit(1)
 
 
 # =============================================================================
@@ -201,6 +197,7 @@ def rotate_image_and_mask(rgb, overlay, angle_deg):
     Rotate Sentinel RGB and overlay arrays so river runs horizontally.
     Returns rotated rgb, overlay, and a valid data mask.
     """
+
     rot_angle = -angle_deg
 
     rgb_rotated = ndimage_rotate(
@@ -584,6 +581,10 @@ def save_overlay_image(sentinel_rgb, overlay, stats, bounds, sentinel_crs,
 # PROCESS SECTION
 # =============================================================================
 
+# =============================================================================
+# PROCESS SECTION
+# =============================================================================
+
 def process_section(args):
     """
     Process a single section. Produces two rotated images:
@@ -635,6 +636,11 @@ def process_section(args):
         sentinel_rgb_first, out_shape_first, _, sentinel_crs_first, bounds_first = \
             load_sentinel_rgb(sentinel_first_path)
 
+        # ── Debug prints ──────────────────────────────────────────────────────
+        h_orig, w_orig = sentinel_rgb_first.shape[:2]
+        print(f"  {section_name} bounds: {bounds_first}")
+        print(f"  {section_name} w_orig: {w_orig}, h_orig: {h_orig}")
+
         river_mile_points = get_river_mile_points(
             river_miles_gdf, sentinel_crs_first, bounds_first
         ) if river_miles_gdf is not None else []
@@ -652,7 +658,16 @@ def process_section(args):
         del first_mask_f, last_mask_f
 
         # ── First year background — rotated ───────────────────────────────────
-        if rotation_angle is not None and (not out_first_rot.exists() or force_rerun):
+        if not out_first_rot.exists() or force_rerun:
+            # ── Debug: check rotated dimensions ──────────────────────────────
+            test_rgb, test_overlay, test_mask = rotate_image_and_mask(
+                sentinel_rgb_first, overlay_f,
+                rotation_angle if rotation_angle is not None else 0
+            )
+            h_rot, w_rot = test_rgb.shape[:2]
+            print(f"  {section_name} w_rot: {w_rot}, h_rot: {h_rot}")
+            del test_rgb, test_overlay, test_mask
+
             save_overlay_image(
                 sentinel_rgb_first, overlay_f, stats_f,
                 bounds_first, sentinel_crs_first,
@@ -681,7 +696,7 @@ def process_section(args):
         del first_mask_l, last_mask_l
 
         # ── Last year background — rotated ────────────────────────────────────
-        if rotation_angle is not None and (not out_last_rot.exists() or force_rerun):
+        if not out_last_rot.exists() or force_rerun:
             save_overlay_image(
                 sentinel_rgb_last, overlay_l, stats_l,
                 bounds_last, sentinel_crs_last,
@@ -701,6 +716,7 @@ def process_section(args):
     except Exception as e:
         import traceback
         return f"  ERROR on {section_name}: {e}\n{traceback.format_exc()}"
+
 
 # =============================================================================
 # MAIN
